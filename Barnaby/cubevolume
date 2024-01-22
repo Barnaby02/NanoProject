@@ -1,0 +1,290 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Flatten, Conv2D, MaxPooling2D, Dropout, BatchNormalization
+from tensorflow.keras.utils import to_categorical
+
+def rot_mat_x(angle):
+    """
+    Creates a rotation matrix for rotation around the x-axis.
+
+    Parameters:
+    - angle: Rotation angle in radians.
+
+    Returns:
+    - 3x3 numpy array representing the rotation matrix.
+    """
+    cos_angle, sin_angle = np.cos(angle), np.sin(angle)
+    return np.array([
+        [1, 0, 0],
+        [0, cos_angle, -sin_angle],
+        [0, sin_angle, cos_angle]
+    ])
+
+
+def rot_mat_y(angle):
+    """
+    Creates a rotation matrix for rotation around the y-axis.
+
+    Parameters:
+    - angle: Rotation angle in radians.
+
+    Returns:
+    - 3x3 numpy array representing the rotation matrix.
+    """
+    cos_angle, sin_angle = np.cos(angle), np.sin(angle)
+    return np.array([
+        [cos_angle, 0, sin_angle],
+        [0, 1, 0],
+        [-sin_angle, 0, cos_angle]
+    ])
+
+
+def rot_mat_z(angle):
+    """
+    Creates a rotation matrix for rotation around the z-axis.
+
+    Parameters:
+    - angle: Rotation angle in radians.
+
+    Returns:
+    - 3x3 numpy array representing the rotation matrix.
+    """
+    cos_angle, sin_angle = np.cos(angle), np.sin(angle)
+    return np.array([
+        [cos_angle, -sin_angle, 0],
+        [sin_angle, cos_angle, 0],
+        [0, 0, 1]
+    ])
+
+
+def generate_cube(res, x, y, z, O_x, O_y, O_z, a):
+    """
+    Generates a 3D array with a solid, rotated cube centered at (x, y, z).
+
+    Parameters:
+    - res: Resolution or the size of the 3D array (assumed to be cubic).
+    - x, y, z: Coordinates of the cube's center within the array.
+    - O_x, O_y, O_z: Rotation angles around the x, y, and z axes, respectively, in radians.
+    - a: The side length of the cube.
+
+    Returns:
+    - 3D numpy array with a solid, rotated cube.
+    """
+    # Create an empty 3D array
+    array = np.zeros((res, res, res))
+
+    # Create rotation matrix from the given angles
+    rot_mat = np.dot(rot_mat_z(O_z), np.dot(rot_mat_y(O_y), rot_mat_x(O_x)))
+
+    # Create a grid of points in the array
+    ind = np.indices((res, res, res)).transpose(1, 2, 3, 0)
+    ind = ind - np.array([x, y, z])
+
+    # Apply rotation
+    rotated_ind = np.tensordot(ind, rot_mat, axes=([3], [1]))
+
+    # Check if each point is within the half side lengths
+    within_cube = np.all(np.abs(rotated_ind) <= a / 2, axis=3)
+
+    # Fill in the points that are within the cube
+    array[within_cube] = 1
+
+    return array
+
+
+def generate_sphere(res, x, y, z, radius):
+    """
+    Generates a 3D array with a solid sphere centered at (x, y, z).
+
+    Parameters:
+    - res: Resolution of the 3D array (assumed to be cubic).
+    - x, y, z: Coordinates of the sphere's center within the array.
+    - radius: Radius of the sphere.
+
+    Returns:
+    - A 3D NumPy array with a solid sphere.
+    """
+    # Create an empty 3D array
+    array = np.zeros((res, res, res))
+
+    # Calculate the distance of each point in the array from the sphere's center
+    ind = np.indices((res, res, res))
+    distances = np.sqrt((ind[0] - x)**2 + (ind[1] - y)**2 + (ind[2] - z)**2)
+
+    # Fill in points within the sphere's radius
+    array[distances <= radius] = 1
+
+    return array
+
+
+def generate_octahedron(res, x, y, z, O_x, O_y, O_z, half_height):
+    """
+    Generates a 3D array with a solid octahedron centered at (x, y, z) with specified rotation.
+    """
+
+    # Create rotation matrices
+    rot_x = rot_mat_x(O_x)
+    rot_y = rot_mat_y(O_y)
+    rot_z = rot_mat_z(O_z)
+    rot_mat = np.dot(rot_z, np.dot(rot_y, rot_x))
+
+    # Define the normal vectors of the octahedron's planes
+    normals = np.array([[1, 1, 1], [-1, 1, 1], [1, -1, 1], [1, 1, -1],
+                        [-1, -1, 1], [1, -1, -1], [-1, 1, -1], [-1, -1, -1]])
+
+    # Rotate the normals
+    rot_normals = np.dot(normals, rot_mat.T)
+
+    # Octahedron's center
+    octa_center = np.array([x, y, z])
+
+    # Vectorized method
+    # Create a grid of points
+    points = np.stack(np.meshgrid(np.arange(res), np.arange(res), np.arange(res), indexing='ij'), axis=-1) - octa_center
+    # Check each point against all normals
+    inside = np.all(np.dot(points, rot_normals.T) <= half_height, axis=-1)
+
+    return inside.astype(int)
+
+
+def generate_tetrahedron(res, x, y, z, O_x, O_y, O_z, size):
+    """
+    Generates a 3D array with a solid tetrahedron centered at (x, y, z).
+    """
+
+    # Define vertices of the tetrahedron (assuming an equilateral tetrahedron)
+    vertices = np.array([
+        [1, 1, 1],
+        [-1, -1, 1],
+        [-1, 1, -1],
+        [1, -1, -1]
+    ]) * size / np.sqrt(3)
+
+    # Calculate normals of the faces
+    normals = np.array([
+        np.cross(vertices[1] - vertices[0], vertices[2] - vertices[0]),
+        np.cross(vertices[0] - vertices[1], vertices[3] - vertices[1]),
+        np.cross(vertices[1] - vertices[2], vertices[3] - vertices[2]),
+        np.cross(vertices[2] - vertices[0], vertices[3] - vertices[0])
+    ])
+
+    # Normalize the normals
+    norms = np.linalg.norm(normals, axis=1)
+    normals = normals / norms[:, np.newaxis]
+
+    # Create rotation matrices
+    rot_x = rot_mat_x(O_x)
+    rot_y = rot_mat_y(O_y)
+    rot_z = rot_mat_z(O_z)
+    rot_mat = np.dot(rot_z, np.dot(rot_y, rot_x))
+
+    # Rotate the normals
+    rot_normals = np.dot(normals, rot_mat.T)
+
+    # Tetrahedron's center
+    tetra_center = np.array([x, y, z])
+
+    # Vectorized method to check points inside the tetrahedron
+    points = np.stack(np.meshgrid(np.arange(res), np.arange(res), np.arange(res), indexing='ij'), axis=-1) - tetra_center
+    inside = np.all(np.dot(points, rot_normals.T) <= size / np.sqrt(2), axis=-1)
+
+    return inside.astype(int)
+
+def preprocess(x, y, im, res):
+    im_z = np.where(im > 0.3, 1.0, 0)
+    dx = np.sum(x*im_z)/np.sum(im_z)-(res/2)
+    dy = np.sum(y*im_z)/np.sum(im_z)-(res/2)
+    im = np.roll(im, -int(np.round(dy)), axis=1)
+    im = np.roll(im, -int(np.round(dx)), axis=0)
+    return im
+
+
+def generate_dataset(num_samples, res):
+    """
+    Generates a dataset of random cubes within a 3D array along with their volumes.
+
+    Parameters:
+    - num_samples: Number of samples to generate.
+    - res: Resolution of the 3D array.
+
+    Returns:
+    - A tuple of two lists: (data, labels), where 'data' is a list of 3D arrays, 
+      and 'labels' is a list of corresponding cube volumes.
+    """
+    data = []
+    labels = []
+
+    for _ in range(num_samples):
+        # Random size within a reasonable range
+        size = np.random.randint(res // 10, res // 3.5)
+        volume = size ** 3
+        l = (3*size**2)**0.5
+        # Ensure the cube is fully within the bounds of the array
+        max_pos = res - l
+        x = np.random.randint(l, max_pos)
+        y = np.random.randint(l, max_pos)
+        z = np.random.randint(l, max_pos)
+
+        # Random rotation angles
+        O_x = np.random.uniform(0, 2 * np.pi)
+        O_y = np.random.uniform(0, 2 * np.pi)
+        O_z = np.random.uniform(0, 2 * np.pi)
+
+        # Generate cube and add to data
+        cube = generate_cube(res, x, y, z, O_x, O_y, O_z, size)
+        projection = np.sum(cube, axis=2)
+        projection *= np.random.rand(1)*1.5 + 0.5
+        projection += np.random.randn(*projection.shape)*(np.sqrt(projection)+0.1)*0.2
+        projection = preprocess(x, y, projection, res)
+        data.append(projection)
+
+        # Calculate volume and add to labels
+        
+        labels.append(volume)
+
+    return data, labels
+'''
+test_data, test_labels = generate_dataset(10, 128)
+plt.figure(figsize=(12, 6))
+for i, (im, volume) in enumerate(zip(test_data, test_labels)):
+    plt.subplot(1, 10, i + 1)
+    plt.imshow(im, cmap='gray')
+    plt.title(f"Vol: {volume}")
+    plt.axis('off')
+plt.tight_layout()
+plt.show()
+'''
+def train_model(num_samples, res):
+    data, labels = generate_dataset(num_samples, res)
+    X = np.array(data).reshape(-1, res, res, 1)  # Reshaping for CNN, adding channel dimension
+    Y = np.array(labels).reshape(-1, 1)
+    train_size = int(0.8 * len(X))
+    X_train, X_val = X[:train_size], X[train_size:]
+    Y_train, Y_val = Y[:train_size], Y[train_size:]
+    model = Sequential([
+        Conv2D(32, kernel_size=(3, 3), activation='relu', input_shape=(res, res, 1)),
+        MaxPooling2D(pool_size=(2, 2)),
+        Dropout(0.1),
+        Conv2D(64, kernel_size=(3, 3), activation='relu'),
+        MaxPooling2D(pool_size=(2, 2)),
+        Dropout(0.1),
+        Flatten(),
+        Dense(64, activation='relu'),
+        Dropout(0.1),
+        Dense(1, 'linear')
+    ])
+    model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mean_squared_error'])
+    history = model.fit(X_train, Y_train, validation_data=(X_val, Y_val), epochs=10, batch_size=32)
+    return history
+
+def visualise_training(history):
+    # Adjusted to plot mean squared error
+    plt.plot(history.history['mean_squared_error'], label='Training MSE')
+    plt.plot(history.history['val_mean_squared_error'], label='Validation MSE')
+    plt.xlabel('Epoch')
+    plt.ylabel('Mean Squared Error')
+    plt.legend(loc='upper right')
+    plt.show()
+
+visualise_training(train_model(1000,100))
